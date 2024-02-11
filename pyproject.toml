@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "firedis"
+version = "0.0.1"
+python_requires = ">=3.10"
+description = "Fast, type-safe, custom Namespaces for local Redis"
+authors = [
+    {name = "Ryan Young", email = "dev@ryayoung.com"}
+]
+readme = "README.md"
+license = "MIT"
+homepage = "https://github.com/ryayoung/firedis"
+repository = "https://github.com/ryayoung/firedis"
+documentation = "https://firedis.readthedocs.io"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Software Development :: Libraries"
+]
+dependencies = [
+    'redis',
+    'hiredis',
+]
