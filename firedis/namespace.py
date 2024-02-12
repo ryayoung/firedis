@@ -9,16 +9,35 @@ from typing import (
     Callable,
     overload,
 )
-import datetime as dt
-import logging
-import socket
+import errno
 import pickle
+import socket
+import logging
+import datetime as dt
 from pickle import UnpicklingError
 from dataclasses import dataclass, field
 from redis import Redis, Connection, ResponseError
 from redis.exceptions import DataError
 from redis._parsers.hiredis import _HiredisParser
 import hiredis
+
+NONBLOCKING_EXCEPTION_ERROR_NUMBERS: dict[type[Exception], Any] = {
+    BlockingIOError: errno.EWOULDBLOCK
+}
+
+try:
+    import ssl
+
+    if hasattr(ssl, "SSLWantReadError"):
+        NONBLOCKING_EXCEPTION_ERROR_NUMBERS[ssl.SSLWantReadError] = 2
+        NONBLOCKING_EXCEPTION_ERROR_NUMBERS[ssl.SSLWantWriteError] = 2
+    else:
+        NONBLOCKING_EXCEPTION_ERROR_NUMBERS[ssl.SSLError] = 2
+
+except ImportError:
+    pass
+
+NONBLOCKING_EXCEPTIONS = tuple(NONBLOCKING_EXCEPTION_ERROR_NUMBERS.keys())
 
 
 ExpiryT = int | dt.timedelta
@@ -132,24 +151,29 @@ class Namespace(Generic[T]):
         self._reader = reader
         self._execute = self.execute_command_optimized
 
-    def execute_command_fallback(self, args: tuple[EncodableT, ...]):
-        """
-        Used if Redis client doesn't meet our assumptions, or its internal API changes.
-        """
-        return self.redis.execute_command(*args)
-
     def execute_command_optimized(self, args: tuple[EncodableT, ...]):
         """
-        A custom implementation of `Redis.execute_command` that eliminates a dozen or so
+        Custom implementation of `Redis.execute_command` that eliminates a dozen or so
         layers of function calls and checks that are unnecessary given our assumptions.
 
         Assumes `args` are already valid arguments to `hiredis.pack_command`
         """
         self._sock.sendall(self.pack_command(args))
+        reader = self._reader
+        buffer = self._parser._buffer
 
         try:
-            while (res := self._reader.gets(False)) is False:
-                self._parser.read_from_socket()
+            while (result := reader.gets(False)) is False:
+                try:
+                    buffer_length = self._sock.recv_into(buffer)
+
+                    if buffer_length == 0:
+                        raise ConnectionError("Server closed connection")
+
+                    reader.feed(buffer, 0, buffer_length)
+
+                except NONBLOCKING_EXCEPTIONS as ex:
+                    raise ConnectionError(f"Error while reading from socket: {ex.args}")
 
         except socket.timeout:
             self._conn.disconnect()
@@ -165,13 +189,19 @@ class Namespace(Generic[T]):
             self._conn.disconnect()
             raise
 
-        if isinstance(res, ResponseError):
+        if isinstance(result, ResponseError):
             try:
-                raise res
+                raise result
             finally:
-                del res
+                del result
 
-        return res
+        return result
+
+    def execute_command_fallback(self, args: tuple[EncodableT, ...]):
+        """
+        Used if Redis client doesn't meet our assumptions, or its internal API changes.
+        """
+        return self.redis.execute_command(*args)
 
     # DICT METHODS
     # -----------------
