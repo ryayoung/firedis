@@ -2,8 +2,6 @@ from __future__ import annotations
 from typing import (
     Any,
     Literal,
-    Iterator,
-    NoReturn,
     TypeVar,
     Generic,
     Callable,
@@ -30,14 +28,15 @@ from firedis.common import (
 )
 
 
+Owner = TypeVar("Owner")
 T = TypeVar("T")
 J = TypeVar("J")
 
 
 @dataclass(slots=True)
-class Namespace(_BaseNamespace, Generic[T]):
+class SingleKey(_BaseNamespace, Generic[T]):
     """
-    Provides generic, type-safe access to a Redis namespace, wrapping all value-based
+    Provides generic, type-safe access to a single value in Redis, wrapping all value-based
     I/O in `loads` and `dumps` respectively.
 
     Makes significant performance optimizations by assuming that `redis` is:
@@ -55,7 +54,7 @@ class Namespace(_BaseNamespace, Generic[T]):
     loads: Callable[[bytes], Any] = default_loads
     dumps: Callable[..., EncodableT] = default_dumps
     pack_command: Callable[..., Any] = hiredis.pack_command
-    prefix: str = delay_init()
+    name: str = delay_init()
     _conn: Connection = delay_init()
     _parser: _HiredisParser = delay_init()
     _reader: hiredis.Reader = delay_init()
@@ -76,7 +75,7 @@ class Namespace(_BaseNamespace, Generic[T]):
             logging.error(msg + ". Disabling optimizations.")
             self._execute = self.execute_command_fallback
 
-        self.prefix = self.namespace + ":"
+        self.name = self.namespace
         conn = self.redis.connection
         connection_kwargs = getattr(conn, "connection_kwargs", {})
         cache_enabled = connection_kwargs.get("cache_enabled", False)
@@ -163,137 +162,16 @@ class Namespace(_BaseNamespace, Generic[T]):
         """
         return self.redis.execute_command(*args)
 
-    # DICT METHODS
-    # -----------------
+    @property
+    def value(self) -> T:
+        if (val := self._execute((b"GET", self.name))) is None:
+            raise KeyError(f"Key '{self.name}' not found")
+        return self.loads(val)
 
-    def __setitem__(self, key: str, value: T):
-        self._execute((b"SET", self.prefix + key, self.dumps(value)))
-
-    def __getitem__(self, key: str) -> T:
-        if (v := self._execute((b"GET", self.prefix + key))) is None:
-            raise KeyError(key)
-        return self.loads(v)
-
-    def __delitem__(self, key: str):
-        if not 1 == self._execute((b"DEL", self.prefix + key)):
-            raise KeyError(key)
-
-    def __contains__(self, key: str) -> bool:
-        return 1 == self._execute((b"EXISTS", self.prefix + key))
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(self.keys())
-
-    def __len__(self) -> int:
-        return len(self.keys())
-
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, (dict, type(self))):
-            return NotImplemented
-        if isinstance(other, type(self)):
-            return self.to_dict() == other.to_dict()
-        return self.to_dict() == other
-
-    def __or__(self, other: dict[str, J] | Namespace[J]) -> dict[str, T | J]:
-        if not isinstance(other, (dict, type(self))):
-            return NotImplemented
-        other_d = other if isinstance(other, dict) else other.to_dict()  # type:ignore
-        result = self.to_dict()
-        result.update(other_d)  # type:ignore
-        return result  # type:ignore
-
-    def __ror__(self, other: dict[str, J] | Namespace[J]) -> dict[str, T | J]:
-        return self.__or__(other)
-
-    def __ior__(self, other: dict[str, T] | Namespace[T]) -> Namespace[T]:
-        if not isinstance(other, (dict, type(self))):
-            return NotImplemented
-        if isinstance(other, dict):
-            self.update(other)
-        else:
-            self.update(other.to_dict())
-        return self
-
-    def __reversed__(self) -> NoReturn:
-        raise NotImplementedError(
-            "reverse cannot be supported since redis keys are unordered."
-        )
-
-    def update(self, mapping: dict[str, T]):
-        return self.mset(mapping)
-
-    def clear(self) -> int:
-        keys = self._execute((b"KEYS", self.prefix + "*"))
-        return 0 if not keys else self._execute((b"DEL",) + tuple(keys))
-
-    def popitem(self) -> NoReturn:
-        raise NotImplementedError(
-            "popitem cannot be supported since insertion order is not known. Use pop instead."
-        )
-
-    @overload
-    def pop(self, key: str) -> T: ...
-
-    @overload
-    def pop(self, key: str, default: T) -> T: ...
-
-    @overload
-    def pop(self, key: str, default: None) -> T | None: ...
-
-    def pop(self, key: str, default: Any = MISSING) -> T | None:
-        if (
-            v := self._execute((b"GETDEL", self.prefix + key))
-        ) is None and default is MISSING:
-            raise KeyError(key)
-        return default if v is None else self.loads(v)
-
-    def items(self) -> list[tuple[str, T]]:
-        keys = self._execute((b"KEYS", self.prefix + "*"))
-        if not keys:
-            return []
-        return list(
-            zip(
-                [k.decode().removeprefix(self.prefix) for k in keys],
-                [self.loads(v) for v in self._execute((b"MGET",) + tuple(keys))],
-            )
-        )
-
-    def values(self) -> list[T]:
-        keys = self._execute((b"KEYS", self.prefix + "*"))
-        if not keys:
-            return []
-        return [self.loads(v) for v in self._execute((b"MGET",) + tuple(keys))]
-
-    def setdefault(self, key: str, default: T) -> T:
-        if 1 == self._execute((b"SETNX", self.prefix + key, self.dumps(default))):
-            return default
-        return self.get(key, default)
-
-    def to_dict(self) -> dict[str, T]:
-        return {k: v for k, v in self.items()}
-
-    # DICT & REDIS METHODS
-    # --------------------
-
-    def keys(self) -> list[str]:
-        "Returns all keys in the namespace"
-        return [
-            k.decode().removeprefix(self.prefix)
-            for k in self._execute((b"KEYS", self.prefix + "*"))
-        ]
-
-    @overload
-    def get(self, name: str) -> T | None: ...
-
-    @overload
-    def get(self, name: str, default: T) -> T: ...
-
-    def get(self, name: str, default=None) -> T | None:
-        return (
-            default
-            if (v := self._execute((b"GET", self.prefix + name))) is None
-            else self.loads(v)
-        )
+    def get(self) -> T | None:
+        if (val := self._execute((b"GET", self.name))) is None:
+            return None
+        return self.loads(val)
 
     # REDIS COMMANDS
     # --------------
@@ -301,7 +179,6 @@ class Namespace(_BaseNamespace, Generic[T]):
     @overload
     def set(
         self,
-        name: str,
         value: T,
         ex: ExpiryT | None = None,
         px: ExpiryT | None = None,
@@ -316,7 +193,6 @@ class Namespace(_BaseNamespace, Generic[T]):
     @overload
     def set(
         self,
-        name: str,
         value: T,
         ex: ExpiryT | None = None,
         px: ExpiryT | None = None,
@@ -330,7 +206,6 @@ class Namespace(_BaseNamespace, Generic[T]):
 
     def set(
         self,
-        name: str,
         value: T,
         ex: ExpiryT | None = None,
         px: ExpiryT | None = None,
@@ -341,7 +216,7 @@ class Namespace(_BaseNamespace, Generic[T]):
         exat: AbsExpiryT | None = None,
         pxat: AbsExpiryT | None = None,
     ) -> T | None:
-        pieces: list[EncodableT] = [b"SET", self.prefix + name, self.dumps(value)]
+        pieces: list[EncodableT] = [b"SET", self.name, self.dumps(value)]
 
         if ex is not None:
             pieces.append(b"EX")
@@ -390,125 +265,36 @@ class Namespace(_BaseNamespace, Generic[T]):
             )
         return self._execute(tuple(pieces))
 
-    def setnx(self, name: str, value: T) -> int:
-        return self._execute((b"SETNX", self.prefix + name, self.dumps(value)))
+    def setnx(self, value: T) -> int:
+        return self._execute((b"SETNX", self.name, self.dumps(value)))
 
-    def setex(self, name: str, time: ExpiryT, value: T):
+    def setex(self, time: ExpiryT, value: T):
         if isinstance(time, dt.timedelta):
             time = int(time.total_seconds())
-        return self._execute((b"SETEX", self.prefix + name, time, self.dumps(value)))
+        return self._execute((b"SETEX", self.name, time, self.dumps(value)))
 
-    def psetex(self, name: str, time: ExpiryT, value: T):
+    def psetex(self, time: ExpiryT, value: T):
         if isinstance(time, dt.timedelta):
             time = int(time.total_seconds() * 1000)
-        return self._execute((b"PSETEX", self.prefix + name, time, self.dumps(value)))
-
-    def mset(self, mapping: dict[str, T]):
-        items: list[EncodableT] = [b"MSET"]
-        for k, v in mapping.items():
-            items.extend((self.prefix + k, self.dumps(v)))
-        self._execute(tuple(items))
-
-    def msetnx(self, mapping: dict[str, T]) -> bool:
-        items: list[EncodableT] = [b"MSETNX"]
-        for k, v in mapping.items():
-            items.extend((self.prefix + k, self.dumps(v)))
-        return self._execute(tuple(items))
-
-    @overload
-    def mget(self, keys: list[str]) -> list[T | None]: ...
-
-    @overload
-    def mget(self, keys: list[str], default: T) -> list[T]: ...
-
-    def mget(self, keys: list[str], default: T | None = None):
-        return [
-            default if v is None else self.loads(v)
-            for v in self._execute((b"MGET",) + tuple([self.prefix + k for k in keys]))
-        ]
+        return self._execute((b"PSETEX", self.name, time, self.dumps(value)))
 
     # STRING COMMANDS
     # ---------------
 
-    def rename(self, src: str, dst: str):
-        return self._execute((b"RENAME", self.prefix + src, self.prefix + dst))
+    def append(self, value: T) -> int:
+        return self._execute((b"APPEND", self.name, self.dumps(value)))
 
-    def renamenx(self, src: str, dst: str) -> int:
-        return self._execute((b"RENAMENX", self.prefix + src, self.prefix + dst))
+    def strlen(self) -> int:
+        return self._execute((b"STRLEN", self.name))
 
-    def append(self, key: str, value: T) -> int:
-        return self._execute((b"APPEND", self.prefix + key, self.dumps(value)))
-
-    def strlen(self, name: str) -> int:
-        return self._execute((b"STRLEN", self.prefix + name))
-
-    def substr(self, name: str, start: int, end: int = -1) -> str:
-        return self._execute((b"SUBSTR", self.prefix + name, start, end)).decode()
-
-    @overload
-    def lcs(
-        self,
-        key1: str,
-        key2: str,
-        len: Literal[False] = False,
-        idx: Literal[False] = False,
-        minmatchlen: int = 0,
-        withmatchlen: bool = False,
-    ) -> str: ...
-
-    @overload
-    def lcs(
-        self,
-        key1: str,
-        key2: str,
-        len: Literal[True] = True,
-        idx: Literal[False] = False,
-        minmatchlen: int = 0,
-        withmatchlen: bool = False,
-    ) -> int: ...
-
-    @overload
-    def lcs(
-        self,
-        key1: str,
-        key2: str,
-        len: Literal[False] = False,
-        idx: Literal[True] = True,
-        minmatchlen: int = 0,
-        withmatchlen: bool = False,
-    ) -> list: ...
-
-    def lcs(
-        self,
-        key1: str,
-        key2: str,
-        len: bool = False,
-        idx: bool = False,
-        minmatchlen: int = 0,
-        withmatchlen: bool = False,
-    ) -> str | int | list:
-        pieces: list[EncodableT] = [b"LCS", self.prefix + key1, self.prefix + key2]
-
-        if len:
-            pieces.append(b"LEN")
-            return self._execute(tuple(pieces))
-
-        if idx:
-            pieces.append(b"IDX")
-            if minmatchlen:
-                pieces.extend((b"MINMATCHLEN", minmatchlen))
-            if withmatchlen:
-                pieces.append(b"WITHMATCHLEN")
-            return self._execute(tuple(pieces))
-
-        return self._execute(tuple(pieces)).decode()
+    def substr(self, start: int, end: int = -1) -> str:
+        return self._execute((b"SUBSTR", self.name, start, end)).decode()
 
     # TIME COMMANDS
     # -------------
 
     def expire(
         self,
-        name: str,
         time: ExpiryT,
         nx: bool = False,
         xx: bool = False,
@@ -517,7 +303,7 @@ class Namespace(_BaseNamespace, Generic[T]):
     ) -> int:
         if isinstance(time, dt.timedelta):
             time = int(time.total_seconds())
-        items: list[EncodableT] = [b"EXPIRE", self.prefix + name, time]
+        items: list[EncodableT] = [b"EXPIRE", self.name, time]
         if nx:
             items.append(b"NX")
         if xx:
@@ -530,7 +316,6 @@ class Namespace(_BaseNamespace, Generic[T]):
 
     def expireat(
         self,
-        name: str,
         when: AbsExpiryT,
         nx: bool = False,
         xx: bool = False,
@@ -539,7 +324,7 @@ class Namespace(_BaseNamespace, Generic[T]):
     ) -> int:
         if isinstance(when, dt.datetime):
             when = int(when.timestamp())
-        items: list[EncodableT] = [b"EXPIREAT", self.prefix + name, when]
+        items: list[EncodableT] = [b"EXPIREAT", self.name, when]
         if nx:
             items.append(b"NX")
         if xx:
@@ -552,7 +337,6 @@ class Namespace(_BaseNamespace, Generic[T]):
 
     def pexpire(
         self,
-        name: str,
         time: ExpiryT,
         nx: bool = False,
         xx: bool = False,
@@ -561,7 +345,7 @@ class Namespace(_BaseNamespace, Generic[T]):
     ) -> int:
         if isinstance(time, dt.timedelta):
             time = int(time.total_seconds() * 1000)
-        items: list[EncodableT] = [b"PEXPIRE", self.prefix + name, time]
+        items: list[EncodableT] = [b"PEXPIRE", self.name, time]
         if nx:
             items.append(b"NX")
         if xx:
@@ -574,7 +358,6 @@ class Namespace(_BaseNamespace, Generic[T]):
 
     def pexpireat(
         self,
-        name: str,
         when: AbsExpiryT,
         nx: bool = False,
         xx: bool = False,
@@ -583,7 +366,7 @@ class Namespace(_BaseNamespace, Generic[T]):
     ) -> int:
         if isinstance(when, dt.datetime):
             when = int(when.timestamp() * 1000)
-        items: list[EncodableT] = [b"PEXPIREAT", self.prefix + name, when]
+        items: list[EncodableT] = [b"PEXPIREAT", self.name, when]
         if nx:
             items.append(b"NX")
         if xx:
@@ -594,61 +377,58 @@ class Namespace(_BaseNamespace, Generic[T]):
             items.append(b"LT")
         return self._execute(tuple(items))
 
-    def ttl(self, name: str) -> int:
-        return self._execute((b"TTL", self.prefix + name))
+    def ttl(self) -> int:
+        return self._execute((b"TTL", self.name))
 
-    def pttl(self, name: str) -> int:
-        return self._execute((b"PTTL", self.prefix + name))
+    def pttl(self) -> int:
+        return self._execute((b"PTTL", self.name))
 
-    def expiretime(self, name: str) -> int:
-        return self._execute((b"EXPIRETIME", self.prefix + name))
+    def expiretime(self) -> int:
+        return self._execute((b"EXPIRETIME", self.name))
 
-    def pexpiretime(self, name: str) -> int:
-        return self._execute((b"PEXPIRETIME", self.prefix + name))
+    def pexpiretime(self) -> int:
+        return self._execute((b"PEXPIRETIME", self.name))
 
-    def persist(self, name: str) -> int:
-        return self._execute((b"PERSIST", self.prefix + name))
+    def persist(self) -> int:
+        return self._execute((b"PERSIST", self.name))
 
     # MOTION COMMANDS
     # ---------------
 
-    def exists(self, *names: str) -> int:
-        "Returns the number of `keys` that exist"
-        return self._execute((b"EXISTS",) + tuple([self.prefix + k for k in names]))
+    def exists(self) -> int:
+        return self._execute((b"EXISTS", self.name))
 
-    def delete(self, *names: str) -> int:
-        return self._execute((b"DEL",) + tuple([self.prefix + k for k in names]))
+    def delete(self) -> int:
+        return self._execute((b"DEL", self.name))
 
-    def getdel(self, name: str) -> None | T:
+    def getdel(self) -> None | T:
         return (
             None
-            if (v := self._execute((b"GETDEL", self.prefix + name))) is None
+            if (v := self._execute((b"GETDEL", self.name))) is None
             else self.loads(v)
         )
 
-    def move(self, name: str, db: int):
-        return self._execute((b"MOVE", self.prefix + name, db))
+    def move(self, db: int):
+        return self._execute((b"MOVE", self.name, db))
 
     def copy(
         self,
-        source: str,
         destination: str,
         destination_db: int | None = None,
         replace: bool = False,
     ):
-        params: list[EncodableT] = [b"COPY", source, destination]
+        params: list[EncodableT] = [b"COPY", self.name, destination]
         if destination_db is not None:
             params.extend((b"DB", destination_db))
         if replace:
             params.append(b"REPLACE")
         return self._execute(tuple(params))
 
-    def dump(self, name: str) -> bytes:
-        return self._execute((b"DUMP", self.prefix + name))
+    def dump(self) -> bytes:
+        return self._execute((b"DUMP", self.name))
 
     def restore(
         self,
-        name: str,
         ttl: float,
         value: bytes,
         replace: bool = False,
@@ -656,7 +436,7 @@ class Namespace(_BaseNamespace, Generic[T]):
         idletime: int | None = None,
         frequency: int | None = None,
     ):
-        items: list[EncodableT] = [b"RESTORE", self.prefix + name, ttl, value]
+        items: list[EncodableT] = [b"RESTORE", self.name, ttl, value]
         if replace:
             items.append(b"REPLACE")
         if absttl:
@@ -670,37 +450,34 @@ class Namespace(_BaseNamespace, Generic[T]):
     # MISC COMMANDS
     # -------------
 
-    def type(self, name: str) -> str | None:
+    def type(self) -> str | None:
         return (
             None
-            if (v := self._execute((b"TYPE", self.prefix + name))) == b"none"
+            if (v := self._execute((b"TYPE", self.name))) == b"none"
             else v.decode()
         )
 
-    def memory_usage(self, key: str, samples: int | None = None) -> int:
-        args: list[EncodableT] = [b"MEMORY", b"USAGE", self.prefix + key]
+    def memory_usage(self, samples: int | None = None) -> int:
+        args: list[EncodableT] = [b"MEMORY", b"USAGE", self.name]
         if samples is not None:
             args.extend((b"SAMPLES", samples))
         return self._execute(tuple(args))
 
     @overload
-    def object(
-        self, infotype: Literal["refcount", "idletime", "freq"], key: str
-    ) -> int: ...
+    def object(self, infotype: Literal["refcount", "idletime", "freq"]) -> int: ...
 
     @overload
-    def object(self, infotype: Literal["encoding"], key: str) -> str: ...
+    def object(self, infotype: Literal["encoding"]) -> str: ...
 
     def object(
         self,
         infotype: Literal["refcount", "encoding", "idletime", "freq"],
-        key: str,
     ) -> int | str:
-        res = self._execute((b"OBJECT", infotype, self.prefix + key))
+        res = self._execute((b"OBJECT", infotype, self.name))
         return res if infotype != "encoding" else res.decode()
 
-    def debug_object(self, key: str):
-        return self._execute((b"DEBUG", b"OBJECT", self.prefix + key))
+    def debug_object(self):
+        return self._execute((b"DEBUG", b"OBJECT", self.name))
 
-    def unlink(self, *names: str):
-        return self._execute((b"UNLINK",) + tuple([self.prefix + k for k in names]))
+    def unlink(self):
+        return self._execute((b"UNLINK", self.name))
