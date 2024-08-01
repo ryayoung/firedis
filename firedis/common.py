@@ -32,6 +32,12 @@ EncodableT = str | int | float | bytes | memoryview
 
 HiredisPackArgs = tuple[EncodableT, ...]
 
+try:
+    from redis._parsers.hiredis import NOT_ENOUGH_DATA
+    HIREDIS_NOT_ENOUGH_DATA = NOT_ENOUGH_DATA
+except ImportError:
+    HIREDIS_NOT_ENOUGH_DATA = False
+
 
 class MISSING:
     pass

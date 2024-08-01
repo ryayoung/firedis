@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "firedis"
-version = "0.1.3"
-python_requires = ">=3.10"
+version = "0.1.4"
+python_requires = ">=3.12"
 description = "Fast, type-safe, custom Namespaces for local Redis"
 authors = [
     {name = "Ryan Young", email = "dev@ryayoung.com"}
@@ -24,6 +24,6 @@ classifiers = [
     "Topic :: Software Development :: Libraries"
 ]
 dependencies = [
-    'redis',
-    'hiredis',
+    'redis==5.0.8',
+    'hiredis==3.0.0',
 ]

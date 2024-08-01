@@ -19,6 +19,7 @@ from redis._parsers.hiredis import _HiredisParser
 import hiredis
 from firedis.common import (
     NONBLOCKING_EXCEPTIONS,
+    HIREDIS_NOT_ENOUGH_DATA,
     ExpiryT,
     AbsExpiryT,
     EncodableT,
@@ -123,7 +124,7 @@ class Namespace(_BaseNamespace, Generic[T]):
         buffer = self._parser._buffer
 
         try:
-            while (result := reader.gets(False)) is False:
+            while (result := reader.gets(False)) is HIREDIS_NOT_ENOUGH_DATA:
                 try:
                     buffer_length = self._sock.recv_into(buffer)
 
