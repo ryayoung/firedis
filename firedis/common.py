@@ -3,9 +3,13 @@ from typing import Any
 import errno
 import pickle
 import datetime as dt
+from importlib import metadata
 from pickle import UnpicklingError
 from dataclasses import field, dataclass
 from redis import Redis
+
+VERSION = metadata.version("firedis")
+
 
 NONBLOCKING_EXCEPTION_ERROR_NUMBERS: dict[type[Exception], Any] = {
     BlockingIOError: errno.EWOULDBLOCK
