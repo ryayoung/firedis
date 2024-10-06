@@ -35,7 +35,7 @@ J = TypeVar("J")
 
 
 @dataclass(slots=True)
-class SingleKey(_BaseNamespace, Generic[T]):
+class Key(_BaseNamespace, Generic[T]):
     """
     Provides generic, type-safe access to a single value in Redis, wrapping all value-based
     I/O in `loads` and `dumps` respectively.
